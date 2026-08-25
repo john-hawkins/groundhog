@@ -13,3 +13,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# local agent configuration (may contain API keys)
+settings.json

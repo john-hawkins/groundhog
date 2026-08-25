@@ -8,6 +8,7 @@ agree on the source of truth.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent.parent
 PROJECTS_DIR = ROOT / "projects"
 AGENTS_MD = ROOT / "AGENTS.md"
+SETTINGS_FILE = ROOT / "settings.json"
 REFLEX_MANAGED_END_MARKER = "<!-- reflex managed end -->"
 
 RESULTS_HEADER = (
@@ -176,5 +178,29 @@ def experiment_agent_instructions() -> str:
     text = AGENTS_MD.read_text()
     idx = text.find(REFLEX_MANAGED_END_MARKER)
     if idx == -1:
-        return text.strip()
+        # Falling back to the whole file would hand the agent the
+        # Reflex-managed developer docs as its prompt, which is worse than
+        # refusing to run.
+        return ""
     return text[idx + len(REFLEX_MANAGED_END_MARKER):].strip()
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    """Write JSON via a temp file + rename so a crash can't leave a torn file."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    os.replace(tmp, path)
+
+
+def read_settings() -> dict:
+    """Read app settings, returning an empty dict if absent or unreadable."""
+    if not SETTINGS_FILE.is_file():
+        return {}
+    try:
+        return json.loads(SETTINGS_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def write_settings(settings: dict) -> None:
+    _write_json(SETTINGS_FILE, settings)

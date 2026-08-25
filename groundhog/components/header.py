@@ -14,7 +14,7 @@ def header() -> rx.Component:
         rx.spacer(),
         rx.icon_button(
             rx.icon("settings", size=18),
-            on_click=SettingsState.toggle_settings,
+            on_click=SettingsState.open_settings,
             variant="ghost",
             color_scheme="gray",
         ),

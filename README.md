@@ -24,10 +24,18 @@ Refer to the [Design](DESIGN.md) document for outline of the initial idea.
 
 ## Usage
 
-For the current version you will need a Claude Code subscription. Log in
-once with `claude /login` (or just run `claude` and follow the prompt) so
-the `claude` CLI is authenticated against your claude.ai account — Groundhog
-launches it headlessly using that login for every experiment run.
+Groundhog can drive Claude Code, OpenCode or Codex. Pick one in the settings
+dialog (the gear icon) and fill in what it needs:
+
+| Agent | Requires | Notes |
+| --- | --- | --- |
+| Claude Code | a claude.ai subscription login | Run `claude /login` once. Any `ANTHROPIC_API_KEY` in your shell is removed before each run so it stays on the subscription. |
+| OpenCode | model + API key | Model is fully qualified, e.g. `anthropic/claude-sonnet-5`. |
+| Codex | API key (model optional) | |
+
+Each agent also takes an optional executable path (if it isn't on `PATH`) and
+extra arguments appended to every run. Settings are saved to `settings.json`
+in the repo root, which is gitignored because it can hold API keys.
 
 1. Install dependencies:
    ```

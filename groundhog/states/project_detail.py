@@ -5,7 +5,7 @@ from __future__ import annotations
 import pydantic
 import reflex as rx
 
-from ..lib import agent, fs
+from ..lib import agent, fs, providers
 
 
 class ColumnInfo(pydantic.BaseModel):
@@ -153,19 +153,29 @@ class ProjectState(rx.State):
             self.run_error = ""
             name = self.name
 
+        settings = fs.read_settings()
         try:
-            async for line in agent.run_experiment(name):
+            async for line in agent.run_experiment(name, settings):
                 async with self:
                     self.log_lines.append(line)
-        except agent.AgentRunError as exc:
+        except (agent.AgentRunError, agent.AgentConfigError) as exc:
             async with self:
                 self.run_error = str(exc)
         except FileNotFoundError:
             async with self:
-                self.run_error = (
-                    "Claude Code CLI ('claude') was not found on PATH."
-                )
+                self.run_error = self._missing_cli_message(settings)
         finally:
             async with self:
                 self.is_running = False
                 self._load_summary(name, fs.read_metadata(name) or {})
+
+    @staticmethod
+    def _missing_cli_message(settings: dict) -> str:
+        provider = providers.get(
+            settings.get("provider", providers.DEFAULT_PROVIDER_ID)
+        )
+        config = (settings.get("provider_config") or {}).get(provider.id, {})
+        return (
+            f"{provider.label} CLI ('{provider.command(config)}') was not "
+            "found on PATH."
+        )
