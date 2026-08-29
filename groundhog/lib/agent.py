@@ -22,19 +22,27 @@ class AgentConfigError(Exception):
     """Raised when the selected provider is missing required configuration."""
 
 
-def _build_prompt() -> str:
-    instructions = fs.experiment_agent_instructions()
-    if not instructions:
-        raise AgentConfigError(
-            "No agent instructions found. Check that AGENTS.md still contains "
-            "the 'Experiment Agent Instructions' section."
-        )
-    return (
+_PREAMBLE = {
+    "analysis": (
+        "Follow the instructions below to analyse the dataset for this data "
+        "science project. The current working directory is the project "
+        "directory."
+    ),
+    "experiment": (
         "Follow the instructions below to run the next experiment for this "
         "data science project. The current working directory is the project "
-        "directory.\n\n"
-        f"{instructions}"
-    )
+        "directory."
+    ),
+}
+
+
+def _build_prompt(kind: str) -> str:
+    instructions = fs.read_prompt(kind)
+    if not instructions:
+        raise AgentConfigError(
+            f"No agent instructions found. Expected them in prompts/{kind}.md."
+        )
+    return f"{_PREAMBLE[kind]}\n\n{instructions}"
 
 
 def _subprocess_env(provider: providers.Provider, config: dict) -> dict[str, str]:
@@ -61,17 +69,52 @@ def resolve_provider(settings: dict) -> tuple[providers.Provider, dict]:
     return provider, config
 
 
+async def run_analysis(
+    project_name: str, settings: dict | None = None
+) -> AsyncIterator[str]:
+    """Run the one-off data analysis pass, which writes ANALYSIS.md."""
+    async for line in _run(project_name, "analysis", settings):
+        yield line
+
+
 async def run_experiment(
     project_name: str, settings: dict | None = None
 ) -> AsyncIterator[str]:
-    """Run the configured agent in ``projects/<project_name>``, streaming output.
+    """Run one experiment loop.
 
-    Yields decoded output lines as they are produced. Raises AgentRunError if
-    the process exits non-zero, AgentConfigError if the provider is not
-    configured, or FileNotFoundError if its CLI isn't installed.
+    A project that has not been analysed yet has to be analysed first, since the
+    experiment prompt treats ANALYSIS.md as established context. Projects that
+    already have experiments predate the analysis stage and are not blocked —
+    they would otherwise be unable to continue work they had already started.
+    """
+    if not fs.has_analysis(project_name) and not fs.has_experiments(project_name):
+        raise AgentConfigError(
+            "Run the analysis first, or write one yourself — the experiment "
+            "prompt uses ANALYSIS.md as its reference."
+        )
+    async for line in _run(project_name, "experiment", settings):
+        yield line
+
+
+async def _run(
+    project_name: str, kind: str, settings: dict | None
+) -> AsyncIterator[str]:
+    """Resolve the provider, build the prompt for ``kind``, stream the output.
+
+    Raises AgentRunError if the process exits non-zero, AgentConfigError if the
+    provider is not configured, or FileNotFoundError if its CLI isn't installed.
     """
     provider, config = resolve_provider(settings or fs.read_settings())
-    prompt = _build_prompt()
+    async for line in _stream(project_name, _build_prompt(kind), provider, config):
+        yield line
+
+
+async def _stream(
+    project_name: str,
+    prompt: str,
+    provider: providers.Provider,
+    config: dict,
+) -> AsyncIterator[str]:
     proc = await asyncio.create_subprocess_exec(
         *provider.argv(prompt, config),
         cwd=fs.project_dir(project_name),
@@ -84,8 +127,8 @@ async def run_experiment(
         async for raw_line in proc.stdout:
             yield raw_line.decode("utf-8", errors="replace").rstrip()
     finally:
-        # Never leave the agent running if the consumer stops reading
-        # (browser closed, exception upstream).
+        # Make sure we never leave the agent running if the consumer stops
+        # reading (browser closed, exception upstream).
         if proc.returncode is None:
             proc.terminate()
     returncode = await proc.wait()

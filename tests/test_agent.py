@@ -25,76 +25,67 @@ def _settings(command: str, provider: str = "claude_code", **config) -> dict:
     }
 
 
-@pytest.fixture(autouse=True)
-def instructions(sandbox):
-    """run_experiment refuses to run without agent instructions."""
-    fs.AGENTS_MD.write_text(
-        "developer docs\n<!-- reflex managed end -->\nRun the next experiment.\n"
-    )
-
-
 async def _collect(project, settings):
     return [line async for line in agent.run_experiment(project, settings)]
 
 
-async def test_streams_agent_output(sandbox, project):
+async def test_streams_agent_output(sandbox, analysed_project):
     command = _fake_agent(sandbox, 'echo "line one"\necho "line two"\n')
-    assert await _collect(project, _settings(command)) == ["line one", "line two"]
+    assert await _collect(analysed_project, _settings(command)) == ["line one", "line two"]
 
 
-async def test_runs_inside_the_project_directory(sandbox, project):
+async def test_runs_inside_the_project_directory(sandbox, analysed_project):
     command = _fake_agent(sandbox, "pwd\n")
-    lines = await _collect(project, _settings(command))
-    assert os.path.realpath(lines[0]) == os.path.realpath(fs.project_dir(project))
+    lines = await _collect(analysed_project, _settings(command))
+    assert os.path.realpath(lines[0]) == os.path.realpath(fs.project_dir(analysed_project))
 
 
-async def test_nonzero_exit_raises(sandbox, project):
+async def test_nonzero_exit_raises(sandbox, analysed_project):
     command = _fake_agent(sandbox, 'echo "boom"\nexit 3\n')
     with pytest.raises(agent.AgentRunError, match="status 3"):
-        await _collect(project, _settings(command))
+        await _collect(analysed_project, _settings(command))
 
 
-async def test_missing_executable_raises_file_not_found(sandbox, project):
+async def test_missing_executable_raises_file_not_found(sandbox, analysed_project):
     with pytest.raises(FileNotFoundError):
-        await _collect(project, _settings("/nonexistent/agent"))
+        await _collect(analysed_project, _settings("/nonexistent/agent"))
 
 
-async def test_prompt_includes_the_agent_instructions(sandbox, project):
+async def test_prompt_includes_the_agent_instructions(sandbox, analysed_project):
     command = _fake_agent(sandbox, 'echo "$*"\n')
-    lines = await _collect(project, _settings(command))
+    lines = await _collect(analysed_project, _settings(command))
     assert "Run the next experiment." in " ".join(lines)
 
 
-async def test_reflex_managed_docs_are_never_sent_as_the_prompt(sandbox, project):
-    """If the marker is gone the instructions are gone, and we must refuse
-    rather than pass the Reflex developer docs to the agent."""
-    fs.AGENTS_MD.write_text("developer docs with no marker")
+async def test_refuses_to_run_without_a_prompt_file(sandbox, analysed_project):
+    (fs.PROMPTS_DIR / "experiment.md").unlink()
     command = _fake_agent(sandbox, "echo hi\n")
-    with pytest.raises(agent.AgentConfigError, match="instructions"):
-        await _collect(project, _settings(command))
+    with pytest.raises(agent.AgentConfigError, match="prompts/experiment.md"):
+        await _collect(analysed_project, _settings(command))
 
 
-async def test_unconfigured_provider_is_rejected_before_spawning(project):
+async def test_unconfigured_provider_is_rejected_before_spawning(analysed_project):
     with pytest.raises(agent.AgentConfigError, match="API key"):
-        await _collect(project, {"provider": "codex"})
+        await _collect(analysed_project, {"provider": "codex"})
 
 
-async def test_api_key_reaches_the_agent_env(sandbox, project):
+async def test_api_key_reaches_the_agent_env(sandbox, analysed_project):
     command = _fake_agent(sandbox, 'echo "key=$OPENAI_API_KEY"\n')
     settings = _settings(command, provider="codex", api_key="sk-test")
-    assert "key=sk-test" in await _collect(project, settings)
+    lines = await _collect(analysed_project, settings)
+    assert "key=sk-test" in lines
 
 
-async def test_claude_code_strips_api_key_vars(sandbox, project, monkeypatch):
+async def test_claude_code_strips_api_key_vars(sandbox, analysed_project, monkeypatch):
     """Claude Code runs on the subscription login, so a stray API key in the
     parent shell must not switch it to API billing."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "leaked")
     command = _fake_agent(sandbox, 'echo "key=[$ANTHROPIC_API_KEY]"\n')
-    assert "key=[]" in await _collect(project, _settings(command))
+    assert "key=[]" in await _collect(analysed_project, _settings(command))
 
 
-async def test_provider_label_used_in_error_message(sandbox, project):
+async def test_provider_label_used_in_error_message(sandbox, analysed_project):
     command = _fake_agent(sandbox, "exit 1\n")
     settings = _settings(command, provider="opencode", api_key="k", model="m")
     with pytest.raises(agent.AgentRunError, match="OpenCode"):
-        await _collect(project, settings)
+        await _collect(analysed_project, settings)

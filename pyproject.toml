@@ -7,6 +7,12 @@ requires-python = ">=3.11"
 dependencies = [
     "pandas>=3.0.5",
     "reflex>=0.9.8.post1",
+    # The experiments the agent writes need a modelling library, and there is
+    # no per-project environment yet, so without this the agent installs it
+    # itself on first run — either by editing this file or silently into
+    # .venv. Declaring it keeps that visible until experiment environments are
+    # isolated properly.
+    "scikit-learn>=1.5",
 ]
 
 [dependency-groups]

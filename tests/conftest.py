@@ -7,22 +7,30 @@ import pytest
 
 from groundhog.lib import fs
 
+ANALYSIS_PROMPT = "# Analysis Prompt\n\n---\nAnalyse the dataset.\n"
+EXPERIMENT_PROMPT = "# Experiment Prompt\n\n---\nRun the next experiment.\n"
+
 
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch):
     """Point the fs module at a throwaway root and return that root."""
     projects = tmp_path / "projects"
     projects.mkdir()
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    (prompts / "analysis.md").write_text(ANALYSIS_PROMPT)
+    (prompts / "experiment.md").write_text(EXPERIMENT_PROMPT)
+
     monkeypatch.setattr(fs, "ROOT", tmp_path)
     monkeypatch.setattr(fs, "PROJECTS_DIR", projects)
+    monkeypatch.setattr(fs, "PROMPTS_DIR", prompts)
     monkeypatch.setattr(fs, "SETTINGS_FILE", tmp_path / "settings.json")
-    monkeypatch.setattr(fs, "AGENTS_MD", tmp_path / "AGENTS.md")
     return tmp_path
 
 
 @pytest.fixture
 def project(sandbox):
-    """A configured project: dataset + metadata."""
+    """A configured project: dataset + metadata, no analysis yet."""
     slug = fs.create_project("Churn Model")
     fs.save_data_file(
         slug,
@@ -40,3 +48,10 @@ def project(sandbox):
         },
     )
     return slug
+
+
+@pytest.fixture
+def analysed_project(project):
+    """A project that has already been through the analysis stage."""
+    fs.analysis_path(project).write_text("# Analysis\n\nTarget is balanced.\n")
+    return project
