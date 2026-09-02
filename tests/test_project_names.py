@@ -118,6 +118,7 @@ def test_stage_is_forbidden_for_a_traversal_name(sandbox):
     the name is rejected as forbidden (Access denied), not a missing slug."""
     assert fs.project_stage("../..") == "forbidden"
     assert fs.project_stage("..") == "forbidden"
+    assert fs.project_stage("") == "forbidden"
 
 
 @pytest.mark.parametrize(

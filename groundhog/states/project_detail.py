@@ -76,10 +76,7 @@ class ProjectState(rx.State):
     def load_project(self):
         name = self.name
         self.error = ""
-        # Stage is decided from what's on disk, so the agent writing ANALYSIS.md
-        # is enough to advance the project. A name the app could not have
-        # created is "forbidden"; a well-formed slug with no directory is
-        # "not_found".
+        # Disk decides the stage; traversal names come back as "forbidden".
         self.stage = fs.project_stage(name)
         if self.stage in ("not_found", "forbidden"):
             return
@@ -115,12 +112,7 @@ class ProjectState(rx.State):
         self.top_result = fs.top_result(name, self.eval_metric, rows)
 
     def _reject_invalid_name(self) -> bool:
-        """Guard the handlers that write, for names that never rendered a page.
-
-        ``load_project`` already turns an unusable name into the forbidden
-        view, but every event handler is reachable directly over the websocket
-        without it, so each write path checks the name itself.
-        """
+        """Block websocket writes for traversal names (access denied)."""
         if fs.is_valid_project_name(self.name):
             return False
         self.stage = "forbidden"
@@ -211,9 +203,7 @@ class ProjectState(rx.State):
         async with self:
             if self.is_running:
                 return
-            # Checked before anything is spawned: run_experiment launches the
-            # coding agent with the project directory as its cwd, so the name
-            # must be one the app could have created.
+            # Do not spawn the agent unless the name is a real project slug.
             if not fs.is_valid_project_name(self.name):
                 self.stage = "forbidden"
                 self.run_error = "Access denied."

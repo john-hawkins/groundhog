@@ -41,11 +41,7 @@ LOWER_IS_BETTER = {"RMSE", "MASE", "MAPE"}
 
 
 class InvalidProjectName(ValueError):
-    """Raised for a project name that ``create_project`` could not have made.
-
-    Project names arrive from the ``/project/[name]`` route, so they are raw
-    user input on every read path, not just at creation time.
-    """
+    """Raised when a URL project name is not a slug this app could have created."""
 
 
 def slugify(name: str) -> str:
@@ -54,21 +50,14 @@ def slugify(name: str) -> str:
 
 
 def validate_project_name(name: str) -> str:
-    """Return ``name`` unchanged if it is a name this app could have created.
-
-    ``slugify`` is idempotent, so a name that is already its own slug is one
-    that came out of ``create_project``. Anything else — path separators,
-    ``..``, spaces, an empty string — is rejected. The empty string needs its
-    own check because it *is* its own slug, and ``PROJECTS_DIR / ""`` is
-    ``PROJECTS_DIR`` itself.
-    """
+    """Reject traversal, empty, and non-slug names before they become a path."""
     if not name or not isinstance(name, str) or slugify(name) != name:
         raise InvalidProjectName(f"Invalid project name: {name!r}")
     return name
 
 
 def is_valid_project_name(name: str) -> bool:
-    """Non-raising form of :func:`validate_project_name`, for UI guards."""
+    """True if ``name`` would pass :func:`validate_project_name` (for UI guards)."""
     try:
         validate_project_name(name)
     except InvalidProjectName:
@@ -77,14 +66,9 @@ def is_valid_project_name(name: str) -> bool:
 
 
 def project_dir(name: str) -> Path:
-    """The directory for ``name``, or raise if it is not a legitimate project.
-
-    Every other path helper funnels through here, so this is the single point
-    at which a name from the URL becomes a filesystem path.
-    """
+    """Resolve ``projects/<name>/``, refusing names that escape that directory."""
     path = PROJECTS_DIR / validate_project_name(name)
-    # A valid slug can still escape via a symlink planted inside projects/,
-    # which the name check alone cannot see.
+    # Block a valid slug that is a symlink pointing outside projects/.
     if not path.resolve().is_relative_to(PROJECTS_DIR.resolve()):
         raise InvalidProjectName(
             f"Project path escapes the projects directory: {name!r}"
@@ -113,12 +97,7 @@ def metadata_path(name: str) -> Path:
 
 
 def project_exists(name: str) -> bool:
-    """Whether ``name`` is a usable project name with a directory on disk.
-
-    An invalid name is reported as "does not exist" rather than raising, so
-    callers that only care about presence (listings, existence checks) stay
-    boolean. ``project_stage`` distinguishes invalid names as ``forbidden``.
-    """
+    """True if ``name`` is a real project directory; invalid names are False."""
     try:
         return project_dir(name).is_dir()
     except InvalidProjectName:
@@ -126,12 +105,7 @@ def project_exists(name: str) -> bool:
 
 
 def list_project_names() -> list[str]:
-    """Every project directory the app is able to open.
-
-    Directories created by hand with names the app could not have produced are
-    skipped: every link and lookup on the home page passes the name back
-    through ``project_dir``, so listing them would only produce dead links.
-    """
+    """List project folders the app can open; skip hand-made non-slug names."""
     if not PROJECTS_DIR.is_dir():
         return []
     return sorted(
@@ -157,12 +131,7 @@ def create_project(raw_name: str) -> str:
 
 
 def safe_filename(filename: str, fallback: str = "dataset.csv") -> str:
-    """Reduce an uploaded filename to a single, harmless path component.
-
-    ``Path(...).name`` drops any directory part but keeps ``..`` intact, and
-    returns an empty string for ``.`` — both of which would target the data
-    directory itself rather than a file inside it.
-    """
+    """Keep only the file basename; ``.`` / ``..`` fall back to dataset.csv."""
     candidate = Path(filename or "").name.strip()
     return fallback if candidate in {"", ".", ".."} else candidate
 
@@ -257,12 +226,7 @@ def list_experiments(name: str) -> list[str]:
 
 
 def project_stage(name: str) -> str:
-    """Which step of the setup flow a project is at, decided from disk alone.
-
-    Invalid names (path traversal, empty, anything ``create_project`` could
-    not have produced) are ``forbidden``, distinct from a well-formed slug
-    that simply has no directory yet (``not_found``).
-    """
+    """Return setup stage from disk; invalid names are ``forbidden`` (access denied)."""
     try:
         exists = project_dir(name).is_dir()
     except InvalidProjectName:

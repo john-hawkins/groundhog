@@ -130,13 +130,6 @@ def test_stage_not_found_for_unknown_project(sandbox):
     assert fs.project_stage("nope") == "not_found"
 
 
-def test_stage_forbidden_for_a_traversal_name(sandbox):
-    """A path that escapes projects/ is denied, not treated as a missing slug."""
-    assert fs.project_stage("../..") == "forbidden"
-    assert fs.project_stage("..") == "forbidden"
-    assert fs.project_stage("") == "forbidden"
-
-
 def test_stage_upload_for_empty_project(sandbox):
     slug = fs.create_project("Empty")
     assert fs.project_stage(slug) == "upload"
