@@ -16,3 +16,8 @@ wheels/
 
 # local agent configuration (may contain API keys)
 settings.json
+
+# Local project data created while using the app (datasets, experiments, results).
+# Keep the tracked README so a clone still has the projects/ directory.
+projects/*
+!projects/README.md

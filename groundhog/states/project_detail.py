@@ -23,7 +23,7 @@ class ExperimentRow(pydantic.BaseModel):
 
 
 class ProjectState(rx.State):
-    # "loading" | "not_found" | "upload" | "configure" | "analysis" | "summary"
+    # "loading" | "not_found" | "forbidden" | "upload" | "configure" | "analysis" | "summary"
     stage: str = "loading"
     error: str = ""
 
@@ -77,9 +77,11 @@ class ProjectState(rx.State):
         name = self.name
         self.error = ""
         # Stage is decided from what's on disk, so the agent writing ANALYSIS.md
-        # is enough to advance the project.
+        # is enough to advance the project. A name the app could not have
+        # created is "forbidden"; a well-formed slug with no directory is
+        # "not_found".
         self.stage = fs.project_stage(name)
-        if self.stage == "not_found":
+        if self.stage in ("not_found", "forbidden"):
             return
 
         self.dataset_files = fs.list_data_files(name)
@@ -112,7 +114,22 @@ class ProjectState(rx.State):
         self.experiments = [ExperimentRow(**r) for r in rows]
         self.top_result = fs.top_result(name, self.eval_metric, rows)
 
+    def _reject_invalid_name(self) -> bool:
+        """Guard the handlers that write, for names that never rendered a page.
+
+        ``load_project`` already turns an unusable name into the forbidden
+        view, but every event handler is reachable directly over the websocket
+        without it, so each write path checks the name itself.
+        """
+        if fs.is_valid_project_name(self.name):
+            return False
+        self.stage = "forbidden"
+        self.error = "Access denied."
+        return True
+
     async def handle_upload(self, files: list[rx.UploadFile]):
+        if self._reject_invalid_name():
+            return
         for file in files:
             data = await file.read()
             fs.save_data_file(self.name, file.name or "dataset.csv", data)
@@ -136,6 +153,8 @@ class ProjectState(rx.State):
 
     @rx.event
     def save_metadata(self):
+        if self._reject_invalid_name():
+            return
         if not self.target_variable:
             self.error = "Choose a target variable."
             return
@@ -168,6 +187,8 @@ class ProjectState(rx.State):
     @rx.event
     def save_analysis(self):
         """Write a user-supplied analysis, skipping the agent run."""
+        if self._reject_invalid_name():
+            return
         try:
             fs.write_analysis(self.name, self.analysis_draft)
         except ValueError as exc:
@@ -189,6 +210,13 @@ class ProjectState(rx.State):
         """Stream one agent run into the log panel, then reload the page state."""
         async with self:
             if self.is_running:
+                return
+            # Checked before anything is spawned: run_experiment launches the
+            # coding agent with the project directory as its cwd, so the name
+            # must be one the app could have created.
+            if not fs.is_valid_project_name(self.name):
+                self.stage = "forbidden"
+                self.run_error = "Access denied."
                 return
             self.is_running = True
             self.log_lines = []
