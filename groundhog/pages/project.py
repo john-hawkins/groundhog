@@ -32,6 +32,20 @@ def project() -> rx.Component:
                 rx.text("Project not found.", color="gray"),
                 padding="4em",
             )),
+            # Traversal / non-slug names: Access denied, not a missing project.
+            ("forbidden", rx.center(
+                rx.vstack(
+                    rx.heading("Access denied", size="5"),
+                    rx.text(
+                        "This project name is not allowed.",
+                        color="gray",
+                    ),
+                    rx.link("Back to projects", href="/"),
+                    spacing="3",
+                    align="center",
+                ),
+                padding="4em",
+            )),
             rx.center(rx.spinner(), padding="4em"),
         ),
         width="100%",

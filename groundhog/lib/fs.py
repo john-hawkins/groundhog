@@ -40,13 +40,40 @@ SPLIT_MODES = ["percentage", "column", "cv_folds"]
 LOWER_IS_BETTER = {"RMSE", "MASE", "MAPE"}
 
 
+class InvalidProjectName(ValueError):
+    """Raised when a URL project name is not a slug this app could have created."""
+
+
 def slugify(name: str) -> str:
     """Turn a user-supplied project name into a filesystem-safe slug."""
     return re.sub(r"[^a-zA-Z0-9_-]+", "-", name.strip()).strip("-").lower()
 
 
+def validate_project_name(name: str) -> str:
+    """Reject traversal, empty, and non-slug names before they become a path."""
+    if not name or not isinstance(name, str) or slugify(name) != name:
+        raise InvalidProjectName(f"Invalid project name: {name!r}")
+    return name
+
+
+def is_valid_project_name(name: str) -> bool:
+    """True if ``name`` would pass :func:`validate_project_name` (for UI guards)."""
+    try:
+        validate_project_name(name)
+    except InvalidProjectName:
+        return False
+    return True
+
+
 def project_dir(name: str) -> Path:
-    return PROJECTS_DIR / name
+    """Resolve ``projects/<name>/``, refusing names that escape that directory."""
+    path = PROJECTS_DIR / validate_project_name(name)
+    # Block a valid slug that is a symlink pointing outside projects/.
+    if not path.resolve().is_relative_to(PROJECTS_DIR.resolve()):
+        raise InvalidProjectName(
+            f"Project path escapes the projects directory: {name!r}"
+        )
+    return path
 
 
 def data_dir(name: str) -> Path:
@@ -70,13 +97,22 @@ def metadata_path(name: str) -> Path:
 
 
 def project_exists(name: str) -> bool:
-    return project_dir(name).is_dir()
+    """True if ``name`` is a real project directory; invalid names are False."""
+    try:
+        return project_dir(name).is_dir()
+    except InvalidProjectName:
+        return False
 
 
 def list_project_names() -> list[str]:
+    """List project folders the app can open; skip hand-made non-slug names."""
     if not PROJECTS_DIR.is_dir():
         return []
-    return sorted(p.name for p in PROJECTS_DIR.iterdir() if p.is_dir())
+    return sorted(
+        p.name
+        for p in PROJECTS_DIR.iterdir()
+        if p.is_dir() and is_valid_project_name(p.name)
+    )
 
 
 def create_project(raw_name: str) -> str:
@@ -94,6 +130,12 @@ def create_project(raw_name: str) -> str:
     return slug
 
 
+def safe_filename(filename: str, fallback: str = "dataset.csv") -> str:
+    """Keep only the file basename; ``.`` / ``..`` fall back to dataset.csv."""
+    candidate = Path(filename or "").name.strip()
+    return fallback if candidate in {"", ".", ".."} else candidate
+
+
 def list_data_files(name: str) -> list[str]:
     d = data_dir(name)
     if not d.is_dir():
@@ -104,8 +146,7 @@ def list_data_files(name: str) -> list[str]:
 def save_data_file(name: str, filename: str, content: bytes) -> None:
     d = data_dir(name)
     d.mkdir(parents=True, exist_ok=True)
-    safe_name = Path(filename).name
-    (d / safe_name).write_bytes(content)
+    (d / safe_filename(filename)).write_bytes(content)
 
 
 def dataset_preview(name: str) -> dict:
@@ -185,8 +226,12 @@ def list_experiments(name: str) -> list[str]:
 
 
 def project_stage(name: str) -> str:
-    """Which step of the setup flow a project is at, decided from disk alone."""
-    if not project_exists(name):
+    """Return setup stage from disk; invalid names are ``forbidden`` (access denied)."""
+    try:
+        exists = project_dir(name).is_dir()
+    except InvalidProjectName:
+        return "forbidden"
+    if not exists:
         return "not_found"
     if not list_data_files(name):
         return "upload"
