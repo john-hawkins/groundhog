@@ -201,8 +201,22 @@ def parse_results(name: str) -> list[dict]:
     return rows
 
 
+def _metric_key(metric: str) -> str:
+    """Normalise a metric name for comparison.
+
+    The metric cell in RESULTS.md is written by the agent, so its casing is not
+    guaranteed to match the metric configured for the project.
+    """
+    return metric.strip().casefold()
+
+
 def top_result(name: str, eval_metric: str | None, rows: list[dict] | None = None) -> str:
-    """Format the best metric value achieved so far, e.g. '0.91 (AUC)'."""
+    """Format the best metric value achieved so far, e.g. '0.91 (AUC)'.
+
+    Only rows reporting the project's evaluation metric are compared. The table
+    accumulates whatever metric each experiment chose to report, and the best of
+    an AUC and an RMSE is not a meaningful number.
+    """
     rows = rows if rows is not None else parse_results(name)
     scored = []
     for row in rows:
@@ -212,9 +226,20 @@ def top_result(name: str, eval_metric: str | None, rows: list[dict] | None = Non
             continue
     if not scored:
         return "—"
-    metric = eval_metric or scored[0][1]
-    values = [v for v, _ in scored]
-    best = min(values) if metric in LOWER_IS_BETTER else max(values)
+    # Projects that predate metadata.json have no configured metric, so the
+    # first row's own metric stands in for one.
+    metric = (eval_metric or scored[0][1]).strip()
+    key = _metric_key(metric)
+    values = [v for v, row_metric in scored if _metric_key(row_metric) == key]
+    if not values:
+        # Distinct from having no results at all: experiments have run, but
+        # none of them reported the metric this project is optimising for.
+        return f"— (no {metric} yet)"
+    # A metric outside LOWER_IS_BETTER is assumed higher-is-better. Issue #2
+    # makes the metric list configurable, at which point the direction should
+    # come from that configuration rather than being inferred here.
+    lower_is_better = {_metric_key(m) for m in LOWER_IS_BETTER}
+    best = min(values) if key in lower_is_better else max(values)
     return f"{best:g} ({metric})" if metric else f"{best:g}"
 
 
