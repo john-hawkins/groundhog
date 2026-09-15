@@ -7,11 +7,13 @@ paths rather than mocking them out.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import stat
 
 import pytest
 
-from groundhog.lib import agent, fs
+from groundhog.lib import agent, fs, runs
 
 # Branches on the prompt it receives, which also proves the correct prompt was
 # routed for each run type. Runs with the project directory as cwd.
@@ -113,6 +115,45 @@ async def test_full_project_lifecycle(sandbox, stub_agent):
     # 8. a second experiment appends rather than replacing
     await _run(agent.run_experiment, slug)
     assert len(fs.parse_results(slug)) == 2
+
+    # 9. every run (analysis + 2 experiments) is tracked, and none left locked
+    records = [
+        json.loads(line)
+        for line in (fs.project_dir(slug) / ".groundhog" / "runs.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert len(records) == 3
+    assert all(r["status"] == "completed" for r in records)
+    assert runs.current(slug) is None
+
+
+async def test_two_concurrent_experiment_runs_only_one_succeeds(sandbox, stub_agent):
+    """The reported bug, reproduced directly: two sessions (here, two
+    concurrent calls) both trying to run an experiment against the same
+    project must not both spawn an agent and both write into experiments/ and
+    RESULTS.md. Exactly one should win; the other must be turned away before
+    it ever touches the filesystem."""
+    slug = fs.create_project("Race")
+    fs.save_data_file(slug, "d.csv", b"a,b\n1,2\n")
+    fs.write_metadata(slug, {"eval_metric": "AUC"})
+    fs.analysis_path(slug).write_text("# Analysis\n\nfindings\n")
+
+    results = await asyncio.gather(
+        _run(agent.run_experiment, slug),
+        _run(agent.run_experiment, slug),
+        return_exceptions=True,
+    )
+
+    successes = [r for r in results if isinstance(r, list)]
+    failures = [r for r in results if isinstance(r, agent.AgentAlreadyRunningError)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+
+    # Only the one winning run actually touched the project.
+    assert fs.list_experiments(slug) == ["logreg-baseline"]
+    assert len(fs.parse_results(slug)) == 1
+    assert runs.current(slug) is None
 
 
 async def test_lifecycle_survives_switching_agent(sandbox, stub_agent):

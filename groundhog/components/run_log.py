@@ -10,6 +10,31 @@ from ..states.project_detail import ProjectState
 def run_log() -> rx.Component:
     return rx.fragment(
         rx.cond(
+            ProjectState.is_running,
+            rx.hstack(
+                rx.cond(
+                    ProjectState.run_started_at != "",
+                    rx.text(
+                        f"Running {ProjectState.run_kind} — started "
+                        f"{ProjectState.run_started_at}",
+                        size="1",
+                        color="gray",
+                    ),
+                ),
+                rx.button(
+                    "Stop",
+                    on_click=ProjectState.stop_run,
+                    color_scheme="red",
+                    variant="soft",
+                    size="1",
+                ),
+                justify="between",
+                align="center",
+                margin_top="1em",
+                width="100%",
+            ),
+        ),
+        rx.cond(
             ProjectState.run_error != "",
             rx.callout(
                 ProjectState.run_error,

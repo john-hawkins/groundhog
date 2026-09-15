@@ -11,7 +11,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 
-from . import fs, providers
+from . import fs, providers, runs
 
 
 class AgentRunError(Exception):
@@ -20,6 +20,14 @@ class AgentRunError(Exception):
 
 class AgentConfigError(Exception):
     """Raised when the selected provider is missing required configuration."""
+
+
+class AgentAlreadyRunningError(Exception):
+    """Raised when another run already holds this project's lock.
+
+    Raised before any subprocess is spawned, so a second click (from another
+    tab, another user, or a double-click) never starts a second process.
+    """
 
 
 _PREAMBLE = {
@@ -101,36 +109,116 @@ async def _run(
 ) -> AsyncIterator[str]:
     """Resolve the provider, build the prompt for ``kind``, stream the output.
 
-    Raises AgentRunError if the process exits non-zero, AgentConfigError if the
-    provider is not configured, or FileNotFoundError if its CLI isn't installed.
+    Raises AgentAlreadyRunningError if the project's lock is already held,
+    AgentRunError if the process exits non-zero (or times out), AgentConfigError
+    if the provider is not configured, or FileNotFoundError if its CLI isn't
+    installed.
     """
-    provider, config = resolve_provider(settings or fs.read_settings())
-    async for line in _stream(project_name, _build_prompt(kind), provider, config):
+    resolved = settings or fs.read_settings()
+    provider, config = resolve_provider(resolved)
+    prompt = _build_prompt(kind)
+    timeout_seconds = resolved.get("run_timeout_seconds")
+    async for line in _stream(
+        project_name, kind, prompt, provider, config, timeout_seconds
+    ):
         yield line
+
+
+async def stop(project_name: str) -> bool:
+    """Ask the run for ``project_name`` to stop. False if nothing is running."""
+    return runs.request_stop(project_name)
 
 
 async def _stream(
     project_name: str,
+    kind: str,
     prompt: str,
     provider: providers.Provider,
     config: dict,
+    timeout_seconds: float | None,
 ) -> AsyncIterator[str]:
-    proc = await asyncio.create_subprocess_exec(
-        *provider.argv(prompt, config),
-        cwd=fs.project_dir(project_name),
-        env=_subprocess_env(provider, config),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+    try:
+        lock = runs.acquire(project_name, kind, provider.id)
+    except runs.AlreadyRunningError as exc:
+        raise AgentAlreadyRunningError(
+            f"{provider.label} is already running for this project "
+            f"(started {exc.lock.started_at})."
+        ) from exc
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *provider.argv(prompt, config),
+            cwd=fs.project_dir(project_name),
+            env=_subprocess_env(provider, config),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    except BaseException:
+        runs.release(project_name, lock.run_id)
+        raise
+
+    runs.update_pid(project_name, lock.run_id, proc.pid)
+    runs.register_process(project_name, lock.run_id, proc)
+
+    timed_out = False
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_seconds if timeout_seconds else None
     assert proc.stdout is not None
     try:
-        async for raw_line in proc.stdout:
-            yield raw_line.decode("utf-8", errors="replace").rstrip()
+        while True:
+            if deadline is not None:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    raw_line = await asyncio.wait_for(proc.stdout.readline(), remaining)
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    break
+            else:
+                raw_line = await proc.stdout.readline()
+            if not raw_line:
+                break
+            line = raw_line.decode("utf-8", errors="replace").rstrip()
+            runs.append_log_line(project_name, lock.run_id, line)
+            yield line
     finally:
         # Make sure we never leave the agent running if the consumer stops
-        # reading (browser closed, exception upstream).
+        # reading (browser closed, exception upstream) or it timed out.
         if proc.returncode is None:
             proc.terminate()
+
     returncode = await proc.wait()
-    if returncode != 0:
+    stopped = runs.stop_requested(project_name)
+    runs.unregister_process(project_name)
+    runs.release(project_name, lock.run_id)
+
+    if timed_out:
+        status = "timeout"
+    elif stopped:
+        status = "stopped"
+    elif returncode == 0:
+        status = "completed"
+    else:
+        status = "failed"
+    runs.append_record(
+        project_name,
+        {
+            "run_id": lock.run_id,
+            "kind": kind,
+            "provider": provider.id,
+            "started_at": lock.started_at,
+            "ended_at": runs._now(),
+            "exit_code": returncode,
+            "status": status,
+            "log_file": f"runs/{lock.run_id}.log",
+        },
+    )
+
+    if timed_out:
+        raise AgentRunError(
+            f"{provider.label} timed out after {timeout_seconds}s and was stopped."
+        )
+    if returncode != 0 and not stopped:
         raise AgentRunError(f"{provider.label} exited with status {returncode}")

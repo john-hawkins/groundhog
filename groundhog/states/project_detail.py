@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pydantic
 import reflex as rx
 
-from ..lib import agent, fs, providers
+from ..lib import agent, fs, providers, runs
+
+# Cap on in-memory log lines per session — the on-disk .groundhog/runs/<id>.log
+# is the full transcript; this just bounds what's held in (and synced to the
+# browser as part of) this session's state.
+MAX_LOG_LINES = 500
+
+# How often a session that is only *watching* a run (didn't start it itself)
+# polls disk for new log lines / the run finishing.
+POLL_INTERVAL_SECONDS = 2
 
 
 class ColumnInfo(pydantic.BaseModel):
@@ -50,13 +61,26 @@ class ProjectState(rx.State):
     experiments: list[ExperimentRow] = []
     top_result: str = "—"
 
-    # experiment run status
+    # experiment run status — mirrors the on-disk lock in .groundhog/lock.json
+    # (owned by groundhog.lib.runs), not authoritative in itself: a run may
+    # have been started by a different browser session entirely.
     is_running: bool = False
+    run_kind: str = ""
+    run_started_at: str = ""
     log_lines: list[str] = []
     run_error: str = ""
     # set when a run exits cleanly but produces nothing, which otherwise looks
     # identical to never having pressed the button
     run_warning: str = ""
+
+    # Backend-only bookkeeping (leading underscore => not sent to the client).
+    # Which run this session is currently tailing the log of.
+    _run_id: str = ""
+    _log_offset: int = 0
+    # True only for the session whose _run() actually spawned the process —
+    # that session gets lines pushed to it directly and must not also poll.
+    _owns_run: bool = False
+    _watch_started: bool = False
 
     @rx.var
     def column_names(self) -> list[str]:
@@ -94,6 +118,10 @@ class ProjectState(rx.State):
             return
 
         self._load_summary(name, fs.read_metadata(name) or {})
+        self._sync_run_status()
+        if not self._watch_started:
+            self._watch_started = True
+            return ProjectState.watch_run
 
     def _load_summary(self, name: str, meta: dict):
         self.record_count = meta.get("record_count", 0)
@@ -198,6 +226,84 @@ class ProjectState(rx.State):
     async def run_experiment(self):
         await self._run(agent.run_experiment, "experiment")
 
+    @rx.event
+    async def stop_run(self):
+        """Ask whatever is running for this project to stop.
+
+        Works regardless of which session (this one or another tab/user)
+        started it — it goes through the project-level lock/registry in
+        groundhog.lib.runs, not any state this session owns.
+        """
+        if not fs.is_valid_project_name(self.name):
+            return
+        await agent.stop(self.name)
+        if not self._owns_run:
+            # The owning session's own _run() will notice the process exit
+            # and update state itself; a merely-watching session has to poll.
+            self._sync_run_status()
+
+    @rx.event(background=True)
+    async def watch_run(self):
+        """Poll disk for a run this session didn't start itself — another
+        tab/user starting, progressing, or finishing a run. Runs for the
+        life of the connection; the session that *does* start a run gets its
+        lines pushed directly by _run() instead and skips this loop's work."""
+        try:
+            while True:
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                async with self:
+                    if self._owns_run or not fs.is_valid_project_name(self.name):
+                        continue
+                    self._sync_run_status()
+        finally:
+            async with self:
+                self._watch_started = False
+
+    def _sync_run_status(self):
+        """Reconcile is_running/log_lines/etc. with the on-disk lock. Safe to
+        call whether or not a run is active, and whether or not this session
+        started it."""
+        name = self.name
+        lock = runs.current(name)
+        if lock is not None:
+            self._on_lock_active(name, lock)
+            return
+        if self._run_id and not self._owns_run:
+            run_id = self._run_id
+            self._run_id = ""
+            self._finish_watched_run(name, run_id)
+
+    def _on_lock_active(self, name: str, lock: runs.RunLock) -> None:
+        self.is_running = True
+        self.run_kind = lock.kind
+        self.run_started_at = lock.started_at
+        if lock.run_id != self._run_id:
+            # First time we've seen this run — backfill everything it has
+            # written so far rather than starting from a blank log panel.
+            self._run_id = lock.run_id
+            lines, offset = runs.tail_log(name, lock.run_id, 0)
+            self.log_lines = lines[-MAX_LOG_LINES:]
+            self._log_offset = offset
+        else:
+            new_lines, offset = runs.tail_log(name, lock.run_id, self._log_offset)
+            if new_lines:
+                self.log_lines = (self.log_lines + new_lines)[-MAX_LOG_LINES:]
+                self._log_offset = offset
+
+    def _finish_watched_run(self, name: str, run_id: str) -> None:
+        """A run this session was only watching (not driving) just ended."""
+        record = runs.find_record(name, run_id)
+        self.is_running = False
+        self.run_kind = ""
+        self.run_started_at = ""
+        if record is not None and record.get("status") in ("failed", "timeout"):
+            exit_code = record.get("exit_code")
+            detail = f" (exit code {exit_code})" if exit_code is not None else ""
+            self.run_error = f"Run {record['status']}{detail}."
+        # Reload rather than just refreshing the summary: an analysis run
+        # moves the project from the analysis stage to summary.
+        self.load_project()
+
     async def _run(self, runner, kind: str):
         """Stream one agent run into the log panel, then reload the page state."""
         async with self:
@@ -209,6 +315,9 @@ class ProjectState(rx.State):
                 self.run_error = "Access denied."
                 return
             self.is_running = True
+            self._owns_run = True
+            self.run_kind = kind
+            self.run_started_at = ""
             self.log_lines = []
             self.run_error = ""
             self.run_warning = ""
@@ -220,8 +329,12 @@ class ProjectState(rx.State):
         try:
             async for line in runner(name, settings):
                 async with self:
-                    self.log_lines.append(line)
-        except (agent.AgentRunError, agent.AgentConfigError) as exc:
+                    self.log_lines = (self.log_lines + [line])[-MAX_LOG_LINES:]
+        except (
+            agent.AgentRunError,
+            agent.AgentConfigError,
+            agent.AgentAlreadyRunningError,
+        ) as exc:
             async with self:
                 self.run_error = str(exc)
         except FileNotFoundError:
@@ -230,6 +343,10 @@ class ProjectState(rx.State):
         finally:
             async with self:
                 self.is_running = False
+                self._owns_run = False
+                self._run_id = ""
+                self.run_kind = ""
+                self.run_started_at = ""
                 # Reload rather than just refreshing the summary: an analysis
                 # run moves the project from the analysis stage to summary.
                 self.load_project()
